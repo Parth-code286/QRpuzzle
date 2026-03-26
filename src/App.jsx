@@ -2,6 +2,105 @@ import { useState, useEffect, useCallback } from 'react'
 import QRDisplay from './components/QRDisplay'
 import ImageViewer from './components/ImageViewer'
 
+// ─── WebSocket Manager ────────────────────────────────────────────────────────
+class WebSocketManager {
+  constructor() {
+    this.ws = null
+    this.reconnectAttempts = 0
+    this.maxReconnectAttempts = 5
+    this.reconnectDelay = 1000
+    this.listeners = new Set()
+    this.roomId = this.getOrCreateRoomId()
+  }
+
+  getOrCreateRoomId() {
+    let roomId = localStorage.getItem('qr_game_room_id')
+    if (!roomId) {
+      roomId = 'room_' + Math.random().toString(36).substr(2, 9)
+      localStorage.setItem('qr_game_room_id', roomId)
+    }
+    return roomId
+  }
+
+  connect() {
+    if (this.ws?.readyState === WebSocket.OPEN) return
+
+    try {
+      // Using a public WebSocket server for demo
+      this.ws = new WebSocket('wss://echo.websocket.org')
+      
+      this.ws.onopen = () => {
+        console.log('WebSocket connected')
+        this.reconnectAttempts = 0
+        // Join room
+        this.send({ type: 'JOIN_ROOM', roomId: this.roomId })
+      }
+
+      this.ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data)
+          if (data.type === 'QR_SCANNED' && data.roomId === this.roomId) {
+            this.notifyListeners(data)
+          }
+        } catch (err) {
+          console.log('Received non-JSON message:', event.data)
+        }
+      }
+
+      this.ws.onclose = () => {
+        console.log('WebSocket disconnected')
+        this.attemptReconnect()
+      }
+
+      this.ws.onerror = (error) => {
+        console.error('WebSocket error:', error)
+      }
+    } catch (error) {
+      console.error('Failed to connect to WebSocket:', error)
+    }
+  }
+
+  attemptReconnect() {
+    if (this.reconnectAttempts < this.maxReconnectAttempts) {
+      this.reconnectAttempts++
+      setTimeout(() => {
+        console.log(`Reconnecting... attempt ${this.reconnectAttempts}`)
+        this.connect()
+      }, this.reconnectDelay * this.reconnectAttempts)
+    }
+  }
+
+  send(data) {
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify({ ...data, roomId: this.roomId, timestamp: Date.now() }))
+    }
+  }
+
+  broadcastScan(qrId) {
+    this.send({ type: 'QR_SCANNED', qrId })
+  }
+
+  addListener(callback) {
+    this.listeners.add(callback)
+  }
+
+  removeListener(callback) {
+    this.listeners.delete(callback)
+  }
+
+  notifyListeners(data) {
+    this.listeners.forEach(callback => callback(data))
+  }
+
+  disconnect() {
+    this.ws?.close()
+    this.ws = null
+  }
+}
+
+// Global WebSocket instance
+const wsManager = new WebSocketManager()
+
 // ─── Constants ────────────────────────────────────────────────────────────────
 const QR_POOL = ['qr1', 'qr2', 'qr3', 'qr4', 'qr5']
 const STORAGE_KEY = 'scannedQrs'
@@ -84,6 +183,14 @@ export default function App() {
         bc.close()
       } catch { /* BroadcastChannel not supported */ }
 
+      // Broadcast globally via WebSocket
+      try {
+        wsManager.connect()
+        wsManager.broadcastScan(qrParam)
+      } catch (error) {
+        console.error('Failed to broadcast scan:', error)
+      }
+
       setLoading(false)
       return
     }
@@ -97,7 +204,7 @@ export default function App() {
     }, 800) // slight delay for loader effect
   }, [syncFromStorage])
 
-  // ── Listen for scan events from other tabs
+  // ── Listen for scan events from other tabs and global WebSocket
   useEffect(() => {
     if (isScannedView) return // not needed on scan page
 
@@ -111,11 +218,22 @@ export default function App() {
       }
     } catch { /* not supported */ }
 
+    // WebSocket listener for global sync
+    const handleWebSocketMessage = (data) => {
+      if (data.type === 'QR_SCANNED') {
+        syncFromStorage()
+      }
+    }
+    
+    wsManager.connect()
+    wsManager.addListener(handleWebSocketMessage)
+
     // Fallback: poll localStorage every 2 seconds
     const pollInterval = setInterval(syncFromStorage, 2000)
 
     return () => {
       channel?.close()
+      wsManager.removeListener(handleWebSocketMessage)
       clearInterval(pollInterval)
     }
   }, [isScannedView, syncFromStorage])
@@ -131,6 +249,13 @@ export default function App() {
       setCurrentQr(picked)
       setLoading(false)
     }, 600)
+  }, [])
+
+  // ── Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      wsManager.disconnect()
+    }
   }, [])
 
   // ─────────────────────────────────────────────────────────────────────────────

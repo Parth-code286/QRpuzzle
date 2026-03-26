@@ -11,6 +11,7 @@ const QR_POOL = ['qr1', 'qr2', 'qr3', 'qr4', 'qr5']
  */
 export default function QRDisplay({ currentQr, scannedQrs, baseUrl, loading, onReset }) {
   const [visible, setVisible] = useState(false)
+  const [qrHidden, setQrHidden] = useState(false)
 
   // Trigger fade-in after mount
   useEffect(() => {
@@ -19,6 +20,21 @@ export default function QRDisplay({ currentQr, scannedQrs, baseUrl, loading, onR
       return () => clearTimeout(t)
     }
   }, [loading])
+
+  // Hide QR if it's been scanned
+  useEffect(() => {
+    if (currentQr && scannedQrs.includes(currentQr)) {
+      setQrHidden(true)
+      // Show new QR after 2 seconds
+      const timer = setTimeout(() => {
+        setQrHidden(false)
+        onReset() // This will pick a new QR
+      }, 2000)
+      return () => clearTimeout(timer)
+    } else {
+      setQrHidden(false)
+    }
+  }, [currentQr, scannedQrs, onReset])
 
   const scannedCount = scannedQrs.length
   const progressPct  = (scannedCount / QR_POOL.length) * 100
@@ -56,7 +72,7 @@ export default function QRDisplay({ currentQr, scannedQrs, baseUrl, loading, onR
         )}
 
         {/* QR Code */}
-        {!loading && currentQr && (
+        {!loading && currentQr && !qrHidden && (
           <div className="flex flex-col items-center gap-4 animate-fade-scale">
             {/* Scan-line effect wrapper */}
             <div className="relative scan-line-wrapper rounded-2xl" id="qr-code-wrapper">
@@ -90,6 +106,19 @@ export default function QRDisplay({ currentQr, scannedQrs, baseUrl, loading, onR
                 {qrUrl}
               </p>
             </div>
+          </div>
+        )}
+
+        {/* QR Scanned - Hidden State */}
+        {!loading && currentQr && qrHidden && (
+          <div className="flex flex-col items-center gap-4 py-8 animate-fade-scale">
+            <div className="text-6xl animate-success">✅</div>
+            <p className="text-white font-bold text-xl text-center">
+              {qrMeta?.emoji} {qrMeta?.label} Scanned!
+            </p>
+            <p className="text-white/40 text-sm text-center">
+              Loading next QR...
+            </p>
           </div>
         )}
 
