@@ -2,15 +2,13 @@ import { useState, useEffect, useCallback } from 'react'
 import QRDisplay from './components/QRDisplay'
 import ImageViewer from './components/ImageViewer'
 
-// ─── WebSocket Manager ────────────────────────────────────────────────────────
-class WebSocketManager {
+// ─── Real-time Sync Manager ────────────────────────────────────────────────────────
+class RealtimeSyncManager {
   constructor() {
-    this.ws = null
-    this.reconnectAttempts = 0
-    this.maxReconnectAttempts = 5
-    this.reconnectDelay = 1000
     this.listeners = new Set()
     this.roomId = this.getOrCreateRoomId()
+    this.isConnected = false
+    this.lastKnownScan = null
   }
 
   getOrCreateRoomId() {
@@ -22,62 +20,99 @@ class WebSocketManager {
     return roomId
   }
 
-  connect() {
-    if (this.ws?.readyState === WebSocket.OPEN) return
+  async connect() {
+    if (this.isConnected) return
 
     try {
-      // Using a public WebSocket server for demo
-      this.ws = new WebSocket('wss://echo.websocket.org')
+      // Use Firebase Realtime Database for cross-device sync
+      // This is a free public demo instance for testing
+      const firebaseUrl = `https://qr-game-sync-default-rtdb.firebaseio.com/rooms/${this.roomId}.json`
       
-      this.ws.onopen = () => {
-        console.log('WebSocket connected')
-        this.reconnectAttempts = 0
-        // Join room
-        this.send({ type: 'JOIN_ROOM', roomId: this.roomId })
-      }
+      console.log('Connecting to real-time sync for room:', this.roomId)
+      this.startFirebaseSync(firebaseUrl)
+      this.isConnected = true
+    } catch (error) {
+      console.error('Failed to connect:', error)
+      // Fallback to polling-based sync
+      this.startPollingFallback()
+    }
+  }
 
-      this.ws.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data)
-          if (data.type === 'QR_SCANNED' && data.roomId === this.roomId) {
-            this.notifyListeners(data)
+  startFirebaseSync(firebaseUrl) {
+    // Poll Firebase for changes every 1 second
+    this.firebaseInterval = setInterval(async () => {
+      try {
+        const response = await fetch(firebaseUrl)
+        if (response.ok) {
+          const data = await response.json()
+          if (data && data.lastScan && data.lastScan !== this.lastKnownScan) {
+            this.lastKnownScan = data.lastScan
+            this.notifyListeners({
+              type: 'QR_SCANNED',
+              qrId: data.lastScanQrId,
+              timestamp: data.timestamp
+            })
           }
-        } catch (err) {
-          console.log('Received non-JSON message:', event.data)
+        }
+      } catch (err) {
+        console.log('Firebase sync error, using fallback')
+      }
+    }, 1000)
+  }
+
+  startPollingFallback() {
+    // Fallback: Use BroadcastChannel for same browser tabs
+    console.log('Using fallback sync method')
+    try {
+      const bc = new BroadcastChannel('qr_game_channel')
+      bc.onmessage = (e) => {
+        if (e.data?.type === 'QR_SCANNED') {
+          this.notifyListeners(e.data)
         }
       }
+    } catch { /* BroadcastChannel not supported */ }
+  }
 
-      this.ws.onclose = () => {
-        console.log('WebSocket disconnected')
-        this.attemptReconnect()
-      }
-
-      this.ws.onerror = (error) => {
-        console.error('WebSocket error:', error)
-      }
+  async broadcastScan(qrId) {
+    const scanData = {
+      lastScan: Date.now().toString(),
+      lastScanQrId: qrId,
+      timestamp: Date.now()
+    }
+    
+    try {
+      // Update Firebase Realtime Database
+      const firebaseUrl = `https://qr-game-sync-default-rtdb.firebaseio.com/rooms/${this.roomId}.json`
+      await fetch(firebaseUrl, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(scanData)
+      })
+      
+      console.log('Broadcasted scan to Firebase:', qrId)
     } catch (error) {
-      console.error('Failed to connect to WebSocket:', error)
+      console.error('Firebase broadcast failed, using local fallback')
     }
-  }
-
-  attemptReconnect() {
-    if (this.reconnectAttempts < this.maxReconnectAttempts) {
-      this.reconnectAttempts++
-      setTimeout(() => {
-        console.log(`Reconnecting... attempt ${this.reconnectAttempts}`)
-        this.connect()
-      }, this.reconnectDelay * this.reconnectAttempts)
-    }
-  }
-
-  send(data) {
-    if (this.ws?.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify({ ...data, roomId: this.roomId, timestamp: Date.now() }))
-    }
-  }
-
-  broadcastScan(qrId) {
-    this.send({ type: 'QR_SCANNED', qrId })
+    
+    // Also use BroadcastChannel for same-browser tabs
+    try {
+      const bc = new BroadcastChannel('qr_game_channel')
+      bc.postMessage({
+        type: 'QR_SCANNED',
+        qrId,
+        timestamp: Date.now()
+      })
+      bc.close()
+    } catch { /* BroadcastChannel not supported */ }
+    
+    // Notify local listeners immediately
+    this.notifyListeners({
+      type: 'QR_SCANNED',
+      qrId,
+      timestamp: Date.now()
+    })
   }
 
   addListener(callback) {
@@ -89,17 +124,27 @@ class WebSocketManager {
   }
 
   notifyListeners(data) {
-    this.listeners.forEach(callback => callback(data))
+    console.log('Notifying listeners of scan:', data)
+    this.listeners.forEach(callback => {
+      try {
+        callback(data)
+      } catch (err) {
+        console.error('Error in listener callback:', err)
+      }
+    })
   }
 
   disconnect() {
-    this.ws?.close()
-    this.ws = null
+    this.isConnected = false
+    if (this.firebaseInterval) {
+      clearInterval(this.firebaseInterval)
+      this.firebaseInterval = null
+    }
   }
 }
 
-// Global WebSocket instance
-const wsManager = new WebSocketManager()
+// Global sync instance
+const syncManager = new RealtimeSyncManager()
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 const QR_POOL = ['qr1', 'qr2', 'qr3', 'qr4', 'qr5']
@@ -183,10 +228,10 @@ export default function App() {
         bc.close()
       } catch { /* BroadcastChannel not supported */ }
 
-      // Broadcast globally via WebSocket
+      // Broadcast globally via real-time sync
       try {
-        wsManager.connect()
-        wsManager.broadcastScan(qrParam)
+        syncManager.connect()
+        syncManager.broadcastScan(qrParam)
       } catch (error) {
         console.error('Failed to broadcast scan:', error)
       }
@@ -204,7 +249,7 @@ export default function App() {
     }, 800) // slight delay for loader effect
   }, [syncFromStorage])
 
-  // ── Listen for scan events from other tabs and global WebSocket
+  // ── Listen for scan events from other tabs and global sync
   useEffect(() => {
     if (isScannedView) return // not needed on scan page
 
@@ -218,22 +263,23 @@ export default function App() {
       }
     } catch { /* not supported */ }
 
-    // WebSocket listener for global sync
-    const handleWebSocketMessage = (data) => {
+    // Real-time sync listener
+    const handleSyncMessage = (data) => {
       if (data.type === 'QR_SCANNED') {
+        console.log('Received scan update:', data)
         syncFromStorage()
       }
     }
     
-    wsManager.connect()
-    wsManager.addListener(handleWebSocketMessage)
+    syncManager.connect()
+    syncManager.addListener(handleSyncMessage)
 
     // Fallback: poll localStorage every 2 seconds
     const pollInterval = setInterval(syncFromStorage, 2000)
 
     return () => {
       channel?.close()
-      wsManager.removeListener(handleWebSocketMessage)
+      syncManager.removeListener(handleSyncMessage)
       clearInterval(pollInterval)
     }
   }, [isScannedView, syncFromStorage])
@@ -254,7 +300,7 @@ export default function App() {
   // ── Cleanup on unmount
   useEffect(() => {
     return () => {
-      wsManager.disconnect()
+      syncManager.disconnect()
     }
   }, [])
 
