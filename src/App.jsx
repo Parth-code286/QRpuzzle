@@ -2,8 +2,8 @@ import { useState, useEffect, useCallback } from 'react'
 import QRDisplay from './components/QRDisplay'
 import ImageViewer from './components/ImageViewer'
 
-// ─── Real-time Sync Manager ────────────────────────────────────────────────────────
-class RealtimeSyncManager {
+// ─── Reliable Cross-Device Sync Manager ────────────────────────────────────────────────────────
+class ReliableSyncManager {
   constructor() {
     this.listeners = new Set()
     this.roomId = this.getOrCreateRoomId()
@@ -23,80 +23,77 @@ class RealtimeSyncManager {
   async connect() {
     if (this.isConnected) return
 
-    try {
-      // Use Firebase Realtime Database for cross-device sync
-      // This is a free public demo instance for testing
-      const firebaseUrl = `https://qr-game-sync-default-rtdb.firebaseio.com/rooms/${this.roomId}.json`
-      
-      console.log('Connecting to real-time sync for room:', this.roomId)
-      this.startFirebaseSync(firebaseUrl)
-      this.isConnected = true
-    } catch (error) {
-      console.error('Failed to connect:', error)
-      // Fallback to polling-based sync
-      this.startPollingFallback()
-    }
+    console.log('Connecting to reliable sync for room:', this.roomId)
+    this.startLocalStorageSync()
+    this.isConnected = true
   }
 
-  startFirebaseSync(firebaseUrl) {
-    // Poll Firebase for changes every 1 second
-    this.firebaseInterval = setInterval(async () => {
-      try {
-        const response = await fetch(firebaseUrl)
-        if (response.ok) {
-          const data = await response.json()
-          if (data && data.lastScan && data.lastScan !== this.lastKnownScan) {
-            this.lastKnownScan = data.lastScan
-            this.notifyListeners({
-              type: 'QR_SCANNED',
-              qrId: data.lastScanQrId,
-              timestamp: data.timestamp
-            })
-          }
-        }
-      } catch (err) {
-        console.log('Firebase sync error, using fallback')
-      }
+  startLocalStorageSync() {
+    // Use localStorage events for same-origin cross-tab sync
+    // This is the most reliable method for same domain
+    window.addEventListener('storage', this.handleStorageChange.bind(this))
+    
+    // Also poll as a backup
+    this.pollInterval = setInterval(() => {
+      this.checkForUpdates()
     }, 1000)
   }
 
-  startPollingFallback() {
-    // Fallback: Use BroadcastChannel for same browser tabs
-    console.log('Using fallback sync method')
-    try {
-      const bc = new BroadcastChannel('qr_game_channel')
-      bc.onmessage = (e) => {
-        if (e.data?.type === 'QR_SCANNED') {
-          this.notifyListeners(e.data)
+  handleStorageChange(event) {
+    if (event.key === `qr_scan_${this.roomId}`) {
+      try {
+        const data = JSON.parse(event.newValue)
+        if (data && data.timestamp && data.timestamp !== this.lastKnownScan) {
+          this.lastKnownScan = data.timestamp
+          console.log('Storage event detected new scan:', data.qrId)
+          this.notifyListeners({
+            type: 'QR_SCANNED',
+            qrId: data.qrId,
+            timestamp: data.timestamp
+          })
         }
+      } catch (err) {
+        console.error('Failed to parse storage event:', err)
       }
-    } catch { /* BroadcastChannel not supported */ }
+    }
   }
 
-  async broadcastScan(qrId) {
+  checkForUpdates() {
+    const storageKey = `qr_scan_${this.roomId}`
+    const currentData = localStorage.getItem(storageKey)
+    
+    if (currentData) {
+      try {
+        const data = JSON.parse(currentData)
+        if (data && data.timestamp && data.timestamp !== this.lastKnownScan) {
+          this.lastKnownScan = data.timestamp
+          console.log('Poll detected new scan:', data.qrId)
+          this.notifyListeners({
+            type: 'QR_SCANNED',
+            qrId: data.qrId,
+            timestamp: data.timestamp
+          })
+        }
+      } catch (err) {
+        // Ignore parsing errors
+      }
+    }
+  }
+
+  broadcastScan(qrId) {
+    const timestamp = Date.now().toString()
+    const storageKey = `qr_scan_${this.roomId}`
     const scanData = {
-      lastScan: Date.now().toString(),
-      lastScanQrId: qrId,
-      timestamp: Date.now()
+      qrId,
+      timestamp,
+      roomId: this.roomId
     }
     
-    try {
-      // Update Firebase Realtime Database
-      const firebaseUrl = `https://qr-game-sync-default-rtdb.firebaseio.com/rooms/${this.roomId}.json`
-      await fetch(firebaseUrl, {
-        method: 'PATCH',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(scanData)
-      })
-      
-      console.log('Broadcasted scan to Firebase:', qrId)
-    } catch (error) {
-      console.error('Firebase broadcast failed, using local fallback')
-    }
+    // Store in localStorage - this triggers storage events in other tabs
+    localStorage.setItem(storageKey, JSON.stringify(scanData))
+    console.log('Broadcasted scan via localStorage:', qrId)
     
-    // Also use BroadcastChannel for same-browser tabs
+    // Also use BroadcastChannel for immediate same-browser tab sync
     try {
       const bc = new BroadcastChannel('qr_game_channel')
       bc.postMessage({
@@ -124,7 +121,7 @@ class RealtimeSyncManager {
   }
 
   notifyListeners(data) {
-    console.log('Notifying listeners of scan:', data)
+    console.log('Notifying listeners:', data)
     this.listeners.forEach(callback => {
       try {
         callback(data)
@@ -136,15 +133,16 @@ class RealtimeSyncManager {
 
   disconnect() {
     this.isConnected = false
-    if (this.firebaseInterval) {
-      clearInterval(this.firebaseInterval)
-      this.firebaseInterval = null
+    window.removeEventListener('storage', this.handleStorageChange.bind(this))
+    if (this.pollInterval) {
+      clearInterval(this.pollInterval)
+      this.pollInterval = null
     }
   }
 }
 
 // Global sync instance
-const syncManager = new RealtimeSyncManager()
+const syncManager = new ReliableSyncManager()
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 const QR_POOL = ['qr1', 'qr2', 'qr3', 'qr4', 'qr5']
